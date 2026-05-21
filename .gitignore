@@ -1,4 +1,5 @@
 build/
+.venv/
 *.o
 *.a
 *.so
