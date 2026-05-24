@@ -1,0 +1,138 @@
+#include "ipc.h"
+
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <iostream>
+#include <string>
+#include <sys/socket.h>
+#include <thread>
+#include <unistd.h>
+
+namespace {
+
+constexpr uint16_t kUdpPort = 19000;
+constexpr const char* kUdsServerPath = "/tmp/cpp_tricks_echo_server.sock";
+constexpr const char* kUdsClientPath = "/tmp/cpp_tricks_echo_client.sock";
+constexpr auto kTestDuration = std::chrono::seconds(5);
+constexpr int kRecvTimeoutMs = 200;
+
+void set_recv_timeout(int fd, int ms) {
+    timeval tv{};
+    tv.tv_sec = ms / 1000;
+    tv.tv_usec = (ms % 1000) * 1000;
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+        throw std::runtime_error("setsockopt SO_RCVTIMEO failed");
+    }
+}
+
+template<typename Transport, typename EchoServer, typename EchoClient>
+uint64_t run_echo_benchmark(const typename Transport::BindParams& bind_params,
+                            typename Transport::SendParams send_params) {
+    std::atomic<bool> stop{false};
+    std::atomic<uint64_t> round_trips{0};
+
+    EchoServer server(bind_params);
+
+    const auto server_fn = [&]() {
+        set_recv_timeout(server.fd(), kRecvTimeoutMs);
+
+        char storage[1024];
+        Buffer buf = Buffer::writable(storage, sizeof(storage));
+        typename Transport::RecvResult recv{};
+
+        while (!stop.load(std::memory_order_acquire)) {
+            try {
+                server.recv_from(buf, recv);
+                Transport::echo(server.fd(), recv, buf);
+            } catch (const std::runtime_error&) {
+                // recv timeout while waiting for the next datagram
+            }
+        }
+    };
+
+    const auto client_fn = [&]() {
+        EchoClient client;
+        set_recv_timeout(client.fd(), kRecvTimeoutMs);
+
+        const char msg[] = "ping";
+        char reply[64];
+        bool uds_client_bound = false;
+
+        while (!stop.load(std::memory_order_acquire)) {
+            try {
+                send_params.payload = Buffer::read_only(msg, sizeof(msg) - 1);
+                if constexpr (std::is_same_v<Transport, Uds>) {
+                    if (!uds_client_bound) {
+                        uds_client_bound = true;
+                    } else {
+                        send_params.client_path.clear();
+                    }
+                }
+
+                Buffer response = client.exchange(
+                    send_params, Buffer::writable(reply, sizeof(reply)));
+
+                if (response.size > 0) {
+                    round_trips.fetch_add(1, std::memory_order_relaxed);
+                }
+            } catch (const std::runtime_error&) {
+                if (stop.load(std::memory_order_acquire)) {
+                    break;
+                }
+            }
+        }
+    };
+
+    std::thread server_thread(server_fn);
+    std::thread client_thread(client_fn);
+    std::thread timer_thread([]() {
+        std::this_thread::sleep_for(kTestDuration);
+    });
+
+    timer_thread.join();
+    stop.store(true, std::memory_order_release);
+
+    client_thread.join();
+    server_thread.join();
+
+    return round_trips.load(std::memory_order_relaxed);
+}
+
+uint64_t run_udp_benchmark() {
+    return run_echo_benchmark<Udp, UdpEchoServer, UdpEchoClient>(
+        Udp::BindParams{.port = kUdpPort},
+        Udp::SendParams{
+            .host = "127.0.0.1",
+            .port = kUdpPort,
+            .payload = Buffer::read_only("ping", 3),
+        });
+}
+
+uint64_t run_uds_benchmark() {
+    ::unlink(kUdsServerPath);
+    ::unlink(kUdsClientPath);
+
+    const uint64_t trips = run_echo_benchmark<Uds, UdsEchoServer, UdsEchoClient>(
+        Uds::BindParams{.path = kUdsServerPath},
+        Uds::SendParams{
+            .server_path = kUdsServerPath,
+            .client_path = kUdsClientPath,
+            .payload = Buffer::read_only("ping", 3),
+        });
+
+    ::unlink(kUdsServerPath);
+    ::unlink(kUdsClientPath);
+    return trips;
+}
+
+}  // namespace
+
+int main() {
+    const uint64_t udp_trips = run_udp_benchmark();
+    const uint64_t uds_trips = run_uds_benchmark();
+
+    std::cout << "UDP round trips in 5s: " << udp_trips << '\n';
+    std::cout << "UDS round trips in 5s: " << uds_trips << '\n';
+    return 0;
+}

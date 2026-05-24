@@ -12,7 +12,7 @@ PROGRAMS := $(foreach p,$(PROGRAMS),$(if $(wildcard $(PROGRAMS_ROOT)/$(p)/src/*.
 
 TARGETS := $(foreach p,$(PROGRAMS),$(BUILD_ROOT)/$(p)/$(p))
 
-.PHONY: all stages clean debug help run $(PROGRAMS) $(foreach p,$(PROGRAMS),stages-$(p) run-$(p))
+.PHONY: all stages clean debug help run test-ipc test-ipc-mp ipc-echo-server ipc-echo-client $(PROGRAMS) $(foreach p,$(PROGRAMS),stages-$(p) run-$(p))
 
 .DEFAULT_GOAL := all
 
@@ -62,6 +62,49 @@ debug: clean all
 
 clean:
 	rm -rf $(foreach p,$(PROGRAMS),$(BUILD_ROOT)/$(p))
+	rm -rf $(BUILD_ROOT)/ipc/test
+
+IPC_TEST_DIR     := $(BUILD_ROOT)/ipc/test
+IPC_TEST_FLAGS   := -Icpp_tricks/ipc/src -pthread
+IPC_ECHO_TEST    := $(IPC_TEST_DIR)/echo_tests
+IPC_ECHO_SERVER  := $(IPC_TEST_DIR)/echo_server
+IPC_ECHO_CLIENT  := $(IPC_TEST_DIR)/echo_client
+IPC_UDP_PORT     := 19000
+IPC_UDS_SERVER   := /tmp/cpp_tricks_echo_server.sock
+IPC_UDS_CLIENT   := /tmp/cpp_tricks_echo_client.sock
+IPC_TEST_SECONDS := 5
+
+$(IPC_TEST_DIR):
+	mkdir -p $@
+
+$(IPC_ECHO_TEST): cpp_tricks/ipc/test/echo_tests.cpp cpp_tricks/ipc/src/ipc.h | $(IPC_TEST_DIR)
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(IPC_TEST_FLAGS) -o $@ $<
+
+$(IPC_ECHO_SERVER): cpp_tricks/ipc/test/echo_server.cpp cpp_tricks/ipc/src/ipc.h | $(IPC_TEST_DIR)
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(IPC_TEST_FLAGS) -o $@ $<
+
+$(IPC_ECHO_CLIENT): cpp_tricks/ipc/test/echo_client.cpp cpp_tricks/ipc/src/ipc.h | $(IPC_TEST_DIR)
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(IPC_TEST_FLAGS) -o $@ $<
+
+ipc-echo-server: $(IPC_ECHO_SERVER)
+ipc-echo-client: $(IPC_ECHO_CLIENT)
+
+test-ipc: $(IPC_ECHO_TEST)
+	./$(IPC_ECHO_TEST)
+
+test-ipc-mp: $(IPC_ECHO_SERVER) $(IPC_ECHO_CLIENT)
+	$(IPC_ECHO_SERVER) udp $(IPC_UDP_PORT) & \
+	server_pid=$$!; \
+	sleep 0.2; \
+	$(IPC_ECHO_CLIENT) udp 127.0.0.1 $(IPC_UDP_PORT) $(IPC_TEST_SECONDS); \
+	kill $$server_pid 2>/dev/null; wait $$server_pid 2>/dev/null || true
+	rm -f $(IPC_UDS_SERVER) $(IPC_UDS_CLIENT); \
+	$(IPC_ECHO_SERVER) uds $(IPC_UDS_SERVER) & \
+	server_pid=$$!; \
+	sleep 0.2; \
+	$(IPC_ECHO_CLIENT) uds $(IPC_UDS_SERVER) $(IPC_UDS_CLIENT) $(IPC_TEST_SECONDS); \
+	kill $$server_pid 2>/dev/null; wait $$server_pid 2>/dev/null || true; \
+	rm -f $(IPC_UDS_SERVER) $(IPC_UDS_CLIENT)
 
 help:
 	@echo "Programs: $(if $(PROGRAMS),$(PROGRAMS),(none — add cpp_tricks/<name>/src/*.cpp))"
@@ -73,4 +116,8 @@ help:
 	@echo "  make stages       build .i / .s / .o / binary for all programs"
 	@echo "  make stages-<program>  intermediates for one program"
 	@echo "  make debug        rebuild all with -g -O0"
+	@echo "  make test-ipc         build and run in-process ipc echo benchmark"
+	@echo "  make test-ipc-mp      build and run two-process udp + uds echo benchmark"
+	@echo "  make ipc-echo-server  build build/ipc/test/echo_server"
+	@echo "  make ipc-echo-client  build build/ipc/test/echo_client"
 	@echo "  make clean        remove build/<program>/ for each program"
