@@ -12,7 +12,7 @@ PROGRAMS := $(foreach p,$(PROGRAMS),$(if $(wildcard $(PROGRAMS_ROOT)/$(p)/src/*.
 
 TARGETS := $(foreach p,$(PROGRAMS),$(BUILD_ROOT)/$(p)/$(p))
 
-.PHONY: all stages clean debug help run test-ipc test-ipc-mp ipc-echo-server ipc-echo-client $(PROGRAMS) $(foreach p,$(PROGRAMS),stages-$(p) run-$(p))
+.PHONY: all stages clean debug help run test-ipc test-ipc-mp test-router ipc-echo-server ipc-echo-client ipc-echo-client-benchmark ipc-router-server ipc-router-client $(PROGRAMS) $(foreach p,$(PROGRAMS),stages-$(p) run-$(p))
 
 .DEFAULT_GOAL := all
 
@@ -67,8 +67,12 @@ clean:
 IPC_TEST_DIR     := $(BUILD_ROOT)/ipc/test
 IPC_TEST_FLAGS   := -Icpp_tricks/ipc/src -pthread
 IPC_ECHO_TEST    := $(IPC_TEST_DIR)/echo_tests
-IPC_ECHO_SERVER  := $(IPC_TEST_DIR)/echo_server
-IPC_ECHO_CLIENT  := $(IPC_TEST_DIR)/echo_client
+IPC_ECHO_SERVER           := $(IPC_TEST_DIR)/echo_server
+IPC_ECHO_CLIENT           := $(IPC_TEST_DIR)/echo_client
+IPC_ECHO_CLIENT_BENCHMARK := $(IPC_TEST_DIR)/echo_client_benchmark
+IPC_ROUTER_SERVER         := $(IPC_TEST_DIR)/router_server
+IPC_ROUTER_CLIENT         := $(IPC_TEST_DIR)/router_client
+IPC_ROUTER_TEST           := $(IPC_TEST_DIR)/router_test
 IPC_UDP_PORT     := 19000
 IPC_UDS_SERVER   := /tmp/cpp_tricks_echo_server.sock
 IPC_UDS_CLIENT   := /tmp/cpp_tricks_echo_client.sock
@@ -86,23 +90,41 @@ $(IPC_ECHO_SERVER): cpp_tricks/ipc/test/echo_server.cpp cpp_tricks/ipc/src/ipc.h
 $(IPC_ECHO_CLIENT): cpp_tricks/ipc/test/echo_client.cpp cpp_tricks/ipc/src/ipc.h | $(IPC_TEST_DIR)
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(IPC_TEST_FLAGS) -o $@ $<
 
+$(IPC_ECHO_CLIENT_BENCHMARK): cpp_tricks/ipc/test/echo_client_benchmark.cpp cpp_tricks/ipc/src/ipc.h | $(IPC_TEST_DIR)
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(IPC_TEST_FLAGS) -o $@ $<
+
+$(IPC_ROUTER_SERVER): cpp_tricks/ipc/test/router_server.cpp cpp_tricks/ipc/src/ipc.h cpp_tricks/ipc/src/router_protocol.h cpp_tricks/ipc/src/router_app.h cpp_tricks/ipc/test/router_client_config.h | $(IPC_TEST_DIR)
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(IPC_TEST_FLAGS) -o $@ $<
+
+$(IPC_ROUTER_CLIENT): cpp_tricks/ipc/test/router_client.cpp cpp_tricks/ipc/src/ipc.h cpp_tricks/ipc/src/router_protocol.h cpp_tricks/ipc/src/router_app.h cpp_tricks/ipc/test/router_client_config.h | $(IPC_TEST_DIR)
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(IPC_TEST_FLAGS) -o $@ $<
+
+$(IPC_ROUTER_TEST): cpp_tricks/ipc/test/router_test.cpp cpp_tricks/ipc/src/router_protocol.h cpp_tricks/ipc/test/router_client_config.h | $(IPC_TEST_DIR)
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(IPC_TEST_FLAGS) -o $@ $<
+
 ipc-echo-server: $(IPC_ECHO_SERVER)
 ipc-echo-client: $(IPC_ECHO_CLIENT)
+ipc-echo-client-benchmark: $(IPC_ECHO_CLIENT_BENCHMARK)
+ipc-router-server: $(IPC_ROUTER_SERVER)
+ipc-router-client: $(IPC_ROUTER_CLIENT)
 
 test-ipc: $(IPC_ECHO_TEST)
 	./$(IPC_ECHO_TEST)
 
-test-ipc-mp: $(IPC_ECHO_SERVER) $(IPC_ECHO_CLIENT)
+test-router: $(IPC_ROUTER_TEST) $(IPC_ROUTER_SERVER) $(IPC_ROUTER_CLIENT)
+	./$(IPC_ROUTER_TEST)
+
+test-ipc-mp: $(IPC_ECHO_SERVER) $(IPC_ECHO_CLIENT_BENCHMARK)
 	$(IPC_ECHO_SERVER) udp $(IPC_UDP_PORT) & \
 	server_pid=$$!; \
 	sleep 0.2; \
-	$(IPC_ECHO_CLIENT) udp 127.0.0.1 $(IPC_UDP_PORT) $(IPC_TEST_SECONDS); \
+	$(IPC_ECHO_CLIENT_BENCHMARK) udp 127.0.0.1 $(IPC_UDP_PORT) $(IPC_TEST_SECONDS); \
 	kill $$server_pid 2>/dev/null; wait $$server_pid 2>/dev/null || true
 	rm -f $(IPC_UDS_SERVER) $(IPC_UDS_CLIENT); \
 	$(IPC_ECHO_SERVER) uds $(IPC_UDS_SERVER) & \
 	server_pid=$$!; \
 	sleep 0.2; \
-	$(IPC_ECHO_CLIENT) uds $(IPC_UDS_SERVER) $(IPC_UDS_CLIENT) $(IPC_TEST_SECONDS); \
+	$(IPC_ECHO_CLIENT_BENCHMARK) uds $(IPC_UDS_SERVER) $(IPC_UDS_CLIENT) $(IPC_TEST_SECONDS); \
 	kill $$server_pid 2>/dev/null; wait $$server_pid 2>/dev/null || true; \
 	rm -f $(IPC_UDS_SERVER) $(IPC_UDS_CLIENT)
 
@@ -120,4 +142,7 @@ help:
 	@echo "  make test-ipc-mp      build and run two-process udp + uds echo benchmark"
 	@echo "  make ipc-echo-server  build build/ipc/test/echo_server"
 	@echo "  make ipc-echo-client  build build/ipc/test/echo_client"
+	@echo "  make test-router       build and run udp + uds router scenario test"
+	@echo "  make ipc-router-server build build/ipc/test/router_server"
+	@echo "  make ipc-router-client build build/ipc/test/router_client"
 	@echo "  make clean        remove build/<program>/ for each program"

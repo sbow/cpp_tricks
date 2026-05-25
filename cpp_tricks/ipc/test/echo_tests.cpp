@@ -44,7 +44,7 @@ uint64_t run_echo_benchmark(const typename Transport::BindParams& bind_params,
         while (!stop.load(std::memory_order_acquire)) {
             try {
                 server.recv_from(buf, recv);
-                Transport::echo(server.fd(), recv, buf);
+                server.echo(recv, buf);
             } catch (const std::runtime_error&) {
                 // recv timeout while waiting for the next datagram
             }

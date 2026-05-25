@@ -1,11 +1,9 @@
 #include "ipc.h"
 
-#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <string>
-#include <sys/socket.h>
 
 namespace {
 
@@ -13,101 +11,78 @@ constexpr uint16_t kDefaultUdpPort = 19000;
 constexpr const char* kDefaultUdpHost = "127.0.0.1";
 constexpr const char* kDefaultUdsServerPath = "/tmp/cpp_tricks_echo_server.sock";
 constexpr const char* kDefaultUdsClientPath = "/tmp/cpp_tricks_echo_client.sock";
-constexpr int kDefaultDurationSec = 5;
-constexpr int kRecvTimeoutMs = 200;
+constexpr int kDefaultRoundTrips = 1;
+constexpr const char* kMessage = "ping";
 
 void usage(const char* prog) {
-    std::cerr << "usage: " << prog << " udp [host] [port] [seconds]\n"
-              << "       " << prog << " uds [server_path] [client_path] [seconds]\n";
-}
-
-void set_recv_timeout(int fd, int ms) {
-    timeval tv{};
-    tv.tv_sec = ms / 1000;
-    tv.tv_usec = (ms % 1000) * 1000;
-    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
-        throw std::runtime_error("setsockopt SO_RCVTIMEO failed");
-    }
+    std::cerr << "usage: " << prog << " udp [host] [port] [count]\n"
+              << "       " << prog << " uds [server_path] [client_path] [count]\n";
 }
 
 template<typename Transport, typename EchoClient>
-uint64_t run_benchmark(typename Transport::SendParams send_params, int duration_sec) {
+void run_round_trips(typename Transport::SendParams send_params, int count) {
     EchoClient client;
-    set_recv_timeout(client.fd(), kRecvTimeoutMs);
 
-    const auto deadline = std::chrono::steady_clock::now()
-        + std::chrono::seconds(duration_sec);
-
-    const char msg[] = "ping";
     char reply[64];
-    uint64_t round_trips = 0;
     bool uds_client_bound = false;
 
-    while (std::chrono::steady_clock::now() < deadline) {
-        try {
-            send_params.payload = Buffer::read_only(msg, sizeof(msg) - 1);
-            if constexpr (std::is_same_v<Transport, Uds>) {
-                if (!uds_client_bound) {
-                    uds_client_bound = true;
-                } else {
-                    send_params.client_path.clear();
-                }
+    for (int i = 0; i < count; ++i) {
+        send_params.payload = Buffer::read_only(kMessage, std::strlen(kMessage));
+        if constexpr (std::is_same_v<Transport, Uds>) {
+            if (!uds_client_bound) {
+                uds_client_bound = true;
+            } else {
+                send_params.client_path.clear();
             }
+        }
 
-            Buffer response = client.exchange(
-                send_params, Buffer::writable(reply, sizeof(reply)));
+        Buffer response = client.exchange(
+            send_params, Buffer::writable(reply, sizeof(reply)));
 
-            if (response.size > 0) {
-                ++round_trips;
-            }
-        } catch (const std::runtime_error&) {
-            if (std::chrono::steady_clock::now() >= deadline) {
-                break;
-            }
+        if (count == 1) {
+            std::cout.write(static_cast<const char*>(response.data),
+                static_cast<std::streamsize>(response.size));
+            std::cout << '\n';
         }
     }
 
-    return round_trips;
+    if (count != 1) {
+        std::cout << count << " round trips completed\n";
+    }
 }
 
-uint64_t run_udp(int argc, char* argv[]) {
+void run_udp(int argc, char* argv[]) {
     const char* host = (argc >= 3) ? argv[2] : kDefaultUdpHost;
     const uint16_t port = (argc >= 4)
         ? static_cast<uint16_t>(std::stoi(argv[3]))
         : kDefaultUdpPort;
-    const int duration = (argc >= 5) ? std::stoi(argv[4]) : kDefaultDurationSec;
+    const int count = (argc >= 5) ? std::stoi(argv[4]) : kDefaultRoundTrips;
 
-    const uint64_t trips = run_benchmark<Udp, UdpEchoClient>(
+    run_round_trips<Udp, UdpEchoClient>(
         Udp::SendParams{
             .host = host,
             .port = port,
-            .payload = Buffer::read_only("ping", 3),
+            .payload = Buffer::read_only(kMessage, std::strlen(kMessage)),
         },
-        duration);
-
-    std::cout << "UDP round trips in " << duration << "s: " << trips << '\n';
-    return trips;
+        count);
 }
 
-uint64_t run_uds(int argc, char* argv[]) {
+void run_uds(int argc, char* argv[]) {
     const std::string server_path = (argc >= 3) ? argv[2] : kDefaultUdsServerPath;
     const std::string client_path = (argc >= 4) ? argv[3] : kDefaultUdsClientPath;
-    const int duration = (argc >= 5) ? std::stoi(argv[4]) : kDefaultDurationSec;
+    const int count = (argc >= 5) ? std::stoi(argv[4]) : kDefaultRoundTrips;
 
     ::unlink(client_path.c_str());
 
-    const uint64_t trips = run_benchmark<Uds, UdsEchoClient>(
+    run_round_trips<Uds, UdsEchoClient>(
         Uds::SendParams{
             .server_path = server_path,
             .client_path = client_path,
-            .payload = Buffer::read_only("ping", 3),
+            .payload = Buffer::read_only(kMessage, std::strlen(kMessage)),
         },
-        duration);
+        count);
 
     ::unlink(client_path.c_str());
-
-    std::cout << "UDS round trips in " << duration << "s: " << trips << '\n';
-    return trips;
 }
 
 }  // namespace

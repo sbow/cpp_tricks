@@ -25,7 +25,7 @@ void run_echo_server(const typename Transport::BindParams& bind_params) {
 
     while (true) {
         server.recv_from(buf, recv);
-        Transport::echo(server.fd(), recv, buf);
+        server.echo(recv, buf);
     }
 }
 
