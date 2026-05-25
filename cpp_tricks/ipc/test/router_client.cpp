@@ -1,6 +1,7 @@
 #include "router_app.h"
 #include "router_client_config.h"
-#include "router_protocol.h"
+#include "router/factory.hpp"
+#include "router_protocol.hpp"
 
 #include <chrono>
 #include <cstring>
@@ -8,8 +9,7 @@
 #include <iostream>
 #include <string>
 #include <thread>
-
-// Sample application roles: sensor, controller, recorder.
+#include <type_traits>
 
 namespace {
 
@@ -26,7 +26,9 @@ void usage(const char* prog) {
               << "       " << prog << " sensor udp [router_port] [client_port]\n"
               << "       " << prog << " controller udp [router_port] [client_port] [log_path]\n"
               << "       " << prog << " recorder udp [client_port] [log_path]\n"
-              << "       (router/client path and port args are optional — defaults in router_client_config.h)\n";
+              << "       " << prog << " sensor shm\n"
+              << "       " << prog << " controller shm [log_path]\n"
+              << "       " << prog << " recorder shm [log_path]\n";
 }
 
 void append_record(const std::string& log_path, const RouterFrame& frame) {
@@ -39,59 +41,76 @@ void append_record(const std::string& log_path, const RouterFrame& frame) {
         << frame.payload() << '\n';
 }
 
-void log_received(const char* role, const std::string& log_path, const RouterFrame& frame) {
-    const EndpointRegistry& reg = demo_registry();
+void log_received(
+    const RouterTopology& topo,
+    const char* role,
+    const std::string& log_path,
+    const RouterFrame& frame) {
     append_record(log_path, frame);
     router_log(std::string(role) + " recv: "
-        + frame.describe(router_endpoint_name(reg, frame.source())));
+        + frame.describe(peer_display_name(topo, frame.source())));
 }
 
-void log_sent(const char* role, uint8_t source_id, const std::string& payload) {
-    const EndpointRegistry& reg = demo_registry();
+void log_sent(
+    const RouterTopology& topo,
+    const char* role,
+    uint8_t source_id,
+    const std::string& payload) {
     router_log(std::string(role) + " send: source="
-        + router_endpoint_name(reg, source_id) + " payload=" + payload);
+        + peer_display_name(topo, source_id) + " payload=" + payload);
 }
 
 std::string log_path_for_role(const char* role, int argc, char* argv[]) {
     if (std::strcmp(role, "controller") == 0) {
-        return (argc >= 6) ? argv[5] : demo_log_path(role);
+        if (argc >= 6) {
+            return argv[5];
+        }
+        if (argc >= 4) {
+            return argv[3];
+        }
+        return demo_log_path(role);
     }
     if (std::strcmp(role, "recorder") == 0) {
-        return (argc >= 5) ? argv[4] : demo_log_path(role);
+        if (argc >= 5) {
+            return argv[4];
+        }
+        if (argc >= 4) {
+            return argv[3];
+        }
+        return demo_log_path(role);
     }
     return {};
 }
 
-template<typename Transport>
-void run_sensor() {
-    const EndpointRegistry& reg = demo_registry();
-    RouterClient<Transport> client(reg, kEndpointSensor);
+template<typename Client>
+void run_sensor(Client& client, const RouterTopology& topo) {
     router_log("sensor: sending " + std::to_string(kSensorMessages) + " messages");
 
     for (int i = 0; i < kSensorMessages; ++i) {
         const std::string payload = "sensor-" + std::to_string(i);
-        log_sent("sensor", kEndpointSensor, payload);
+        log_sent(topo, "sensor", kEndpointSensor, payload);
         client.send_message(kEndpointSensor, payload);
         std::this_thread::sleep_for(std::chrono::milliseconds(80));
     }
     router_log("sensor: done");
 }
 
-template<typename Transport>
-void run_controller(const std::string& log_path) {
-    const EndpointRegistry& reg = demo_registry();
-    RouterClient<Transport> client(reg, kEndpointController);
+template<typename Client>
+void run_controller(Client& client, const RouterTopology& topo, const std::string& log_path) {
     router_log("controller: listening (log " + log_path + ")");
 
     for (int i = 0; i < kControllerMessages; ++i) {
         router_log("controller: waiting for sensor packet...");
         RouterFrame frame;
-        client.recv_message_blocking_until(kEndpointSensor, frame);
+        if (!client.recv_message_until(kEndpointSensor, frame)) {
+            router_log("controller: stopped");
+            return;
+        }
         client.set_recv_timeout_ms(kRecvTimeoutMs);
-        log_received("controller", log_path, frame);
+        log_received(topo, "controller", log_path, frame);
 
         const std::string payload = "control-" + std::to_string(i);
-        log_sent("controller", kEndpointController, payload);
+        log_sent(topo, "controller", kEndpointController, payload);
         client.send_message(kEndpointController, payload);
     }
 
@@ -99,19 +118,20 @@ void run_controller(const std::string& log_path) {
     const auto deadline = std::chrono::steady_clock::now()
         + std::chrono::milliseconds(kControllerListenMs);
     RouterFrame frame;
-    while (std::chrono::steady_clock::now() < deadline) {
+    while (std::chrono::steady_clock::now() < deadline
+        && !router_stop_requested()) {
         if (client.recv_message(frame)) {
-            log_received("controller", log_path, frame);
+            log_received(topo, "controller", log_path, frame);
+        } else {
+            std::this_thread::yield();
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     router_log("controller: done");
 }
 
-template<typename Transport>
-void run_recorder(const std::string& log_path) {
-    const EndpointRegistry& reg = demo_registry();
-    RouterClient<Transport> client(reg, kEndpointRecorder);
+template<typename Client>
+void run_recorder(Client& client, const RouterTopology& topo, const std::string& log_path) {
     client.set_recv_timeout_ms(kRecvTimeoutMs);
     router_log("recorder: listening (log " + log_path + ")");
 
@@ -119,37 +139,63 @@ void run_recorder(const std::string& log_path) {
     auto last_activity = std::chrono::steady_clock::now();
     while (!router_stop_requested()) {
         if (client.recv_message(frame)) {
-            log_received("recorder", log_path, frame);
+            log_received(topo, "recorder", log_path, frame);
             last_activity = std::chrono::steady_clock::now();
-        } else if (router_test_mode()
-            && router_idle_expired(last_activity,
-                std::chrono::milliseconds(kRecorderTestIdleExitMs))) {
-            break;
+        } else {
+            if (router_test_mode()
+                && router_idle_expired(last_activity,
+                    std::chrono::milliseconds(kRecorderTestIdleExitMs))) {
+                break;
+            }
+            std::this_thread::yield();
         }
     }
 }
 
-template<typename Transport>
-int dispatch_role(const char* role, int argc, char* argv[]) {
-    const EndpointRegistry& reg = demo_registry();
-    const EndpointInfo* info = endpoint_by_name(reg, role);
-    if (!info) {
+template<typename Client>
+int dispatch_role_client(
+    const char* role,
+    int argc,
+    char* argv[],
+    const RouterTopology& topo,
+    Client& client) {
+    const PeerEntry* entry = peer_by_name(topo, role);
+    if (!entry) {
         return 1;
     }
 
-    switch (info->id) {
+    switch (entry->id) {
         case kEndpointSensor:
-            run_sensor<Transport>();
+            run_sensor(client, topo);
             return 0;
         case kEndpointController:
-            run_controller<Transport>(log_path_for_role(role, argc, argv));
+            run_controller(client, topo, log_path_for_role(role, argc, argv));
             return 0;
         case kEndpointRecorder:
-            run_recorder<Transport>(log_path_for_role(role, argc, argv));
+            run_recorder(client, topo, log_path_for_role(role, argc, argv));
             return 0;
         default:
             return 1;
     }
+}
+
+template<DatagramTransport Transport>
+int dispatch_role_datagram(const char* role, int argc, char* argv[]) {
+    const TransportKind kind =
+        std::is_same_v<Transport, Udp> ? TransportKind::Udp : TransportKind::Uds;
+    auto client = make_datagram_router_client<Transport>(
+        demo_topology(kind), peer_by_name(demo_topology(kind), role)->id);
+    return dispatch_role_client(role, argc, argv, demo_topology(kind), client);
+}
+
+int dispatch_role_shm(const char* role, int argc, char* argv[]) {
+    const RouterTopology& topo = demo_topology(TransportKind::Shm);
+    const PeerEntry* entry = peer_by_name(topo, role);
+    if (!entry) {
+        return 1;
+    }
+    auto client = make_shm_router_client(topo, entry->id);
+    return dispatch_role_client(role, argc, argv, topo, client);
 }
 
 struct RoleDispatcher {
@@ -159,7 +205,11 @@ struct RoleDispatcher {
 
     template<typename Transport>
     int operator()() const {
-        return dispatch_role<Transport>(role, argc, argv);
+        if constexpr (std::is_same_v<Transport, ShmSpsc>) {
+            return dispatch_role_shm(role, argc, argv);
+        } else {
+            return dispatch_role_datagram<Transport>(role, argc, argv);
+        }
     }
 };
 
@@ -174,11 +224,10 @@ int main(int argc, char* argv[]) {
     }
 
     const char* role = argv[1];
-    const char* transport = argv[2];
 
     try {
-        const int rc = dispatch_transport(
-            transport, RoleDispatcher{role, argc, argv});
+        const int rc = dispatch_transport_kind(
+            argv[2], RoleDispatcher{role, argc, argv});
         if (rc != 0) {
             usage(argv[0]);
             return 1;

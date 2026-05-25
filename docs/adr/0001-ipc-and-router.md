@@ -1,8 +1,10 @@
 # ADR 0001: Header-only IPC library and message router
 
-- **Status:** Accepted (updated 2026-05-25)
+- **Status:** Accepted (updated 2026-05-25; registry/peers sections superseded by [ADR 0002](0002-ipc-router-refactor.md))
 - **Date:** 2026-05-25
 - **Scope:** `cpp_tricks/ipc/src/ipc.h`, `cpp_tricks/ipc/src/router_protocol.h`, `cpp_tricks/ipc/src/router_app.h`, router/echo tests
+
+> **Note:** The refactor in [ADR 0002](0002-ipc-router-refactor.md) splits monolithic headers, replaces `EndpointRegistry` / `RouterPeers` with `RouterTopology` / `DatagramRouterLink`, and introduces `IpcEndpoint<Transport>` plus `ShmSpsc`. The narrative below describes the original design; use ADR 0002 for the current layout.
 
 ## Context
 
@@ -159,12 +161,13 @@ The **sensor / controller / recorder** demo is sample code, not part of the prot
 
 ### Planned follow-ups
 
-- **`ShmSpsc` transport** — documented in `cpp_tricks/ipc/SHM_SPSC_TRANSPORT.md` (spin ring first, optional `eventfd` idle).
+- ~~**`ShmSpsc` transport**~~ — implemented; see [ADR 0002](0002-ipc-router-refactor.md) and `cpp_tricks/ipc/src/ipc/shm_spsc.hpp`.
 
 ## References
 
-- `cpp_tricks/ipc/src/ipc.h`
-- `cpp_tricks/ipc/src/router_protocol.h`
+- `cpp_tricks/ipc/src/ipc.hpp` (umbrella; `ipc.h` includes it)
+- `cpp_tricks/ipc/src/router_protocol.hpp` (umbrella; `router_protocol.h` includes it)
+- [ADR 0002: IPC and router refactor](0002-ipc-router-refactor.md)
 - `cpp_tricks/ipc/src/router_app.h`
 - `cpp_tricks/ipc/test/router_client_config.h`
 - `cpp_tricks/ipc/SHM_SPSC_TRANSPORT.md`

@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include <vector>
 #include <csignal>
+#include <sys/mman.h>
 #include <sys/wait.h>
 
 namespace {
@@ -30,6 +31,13 @@ void cleanup_paths() {
     ::unlink(kRecorderUdsPath);
     ::unlink(kRecorderLogPath);
     ::unlink(kControllerLogPath);
+}
+
+void cleanup_shm_paths() {
+    ::shm_unlink(kRouterShmName);
+    ::shm_unlink(kSensorShmName);
+    ::shm_unlink(kControllerShmName);
+    ::shm_unlink(kRecorderShmName);
 }
 
 void redirect_stdio_to_devnull() {
@@ -119,7 +127,13 @@ int count_source(const std::string& path, int source_id) {
 }
 
 int run_scenario(const char* transport) {
-    cleanup_paths();
+    ::unlink(kRecorderLogPath);
+    ::unlink(kControllerLogPath);
+    if (std::strcmp(transport, "shm") == 0) {
+        cleanup_shm_paths();
+    } else {
+        cleanup_paths();
+    }
     std::cout << "starting " << transport << " router scenario..." << std::endl;
 
     char router_port[16];
@@ -132,9 +146,13 @@ int run_scenario(const char* transport) {
     std::snprintf(recorder_port, sizeof(recorder_port), "%u", kRecorderUdpPort);
 
     const bool uds = std::strcmp(transport, "uds") == 0;
-    const pid_t router = uds
-        ? spawn_child(kRouterServerBin, {"uds", kRouterUdsPath})
-        : spawn_child(kRouterServerBin, {"udp", router_port});
+    const bool shm = std::strcmp(transport, "shm") == 0;
+
+    const pid_t router = shm
+        ? spawn_child(kRouterServerBin, {"shm"})
+        : uds
+            ? spawn_child(kRouterServerBin, {"uds", kRouterUdsPath})
+            : spawn_child(kRouterServerBin, {"udp", router_port});
     if (router < 0) {
         std::cerr << transport << " router test: fork router failed\n";
         return 1;
@@ -142,22 +160,26 @@ int run_scenario(const char* transport) {
 
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
-    const pid_t recorder = uds
-        ? spawn_child(kRouterClientBin,
-            {"recorder", "uds", kRecorderUdsPath, kRecorderLogPath})
-        : spawn_child(kRouterClientBin,
-            {"recorder", "udp", recorder_port, kRecorderLogPath});
+    const pid_t recorder = shm
+        ? spawn_child(kRouterClientBin, {"recorder", "shm", kRecorderLogPath})
+        : uds
+            ? spawn_child(kRouterClientBin,
+                {"recorder", "uds", kRecorderUdsPath, kRecorderLogPath})
+            : spawn_child(kRouterClientBin,
+                {"recorder", "udp", recorder_port, kRecorderLogPath});
     if (recorder < 0) {
         stop_pid(router);
         std::cerr << transport << " router test: fork recorder failed\n";
         return 1;
     }
 
-    const pid_t controller = uds
-        ? spawn_child(kRouterClientBin,
-            {"controller", "uds", kRouterUdsPath, kControllerUdsPath, kControllerLogPath})
-        : spawn_child(kRouterClientBin,
-            {"controller", "udp", router_port, controller_port, kControllerLogPath});
+    const pid_t controller = shm
+        ? spawn_child(kRouterClientBin, {"controller", "shm", kControllerLogPath})
+        : uds
+            ? spawn_child(kRouterClientBin,
+                {"controller", "uds", kRouterUdsPath, kControllerUdsPath, kControllerLogPath})
+            : spawn_child(kRouterClientBin,
+                {"controller", "udp", router_port, controller_port, kControllerLogPath});
     if (controller < 0) {
         stop_all(recorder, 0, router);
         std::cerr << transport << " router test: fork controller failed\n";
@@ -166,11 +188,13 @@ int run_scenario(const char* transport) {
 
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
-    const pid_t sensor = uds
-        ? spawn_child(kRouterClientBin,
-            {"sensor", "uds", kRouterUdsPath, kSensorUdsPath})
-        : spawn_child(kRouterClientBin,
-            {"sensor", "udp", router_port, sensor_port});
+    const pid_t sensor = shm
+        ? spawn_child(kRouterClientBin, {"sensor", "shm"})
+        : uds
+            ? spawn_child(kRouterClientBin,
+                {"sensor", "uds", kRouterUdsPath, kSensorUdsPath})
+            : spawn_child(kRouterClientBin,
+                {"sensor", "udp", router_port, sensor_port});
     if (sensor < 0) {
         stop_all(recorder, controller, router);
         std::cerr << transport << " router test: fork sensor failed\n";
@@ -211,6 +235,8 @@ int main() {
     setenv("ROUTER_TEST", "1", 1);
     const int uds_rc = run_scenario("uds");
     const int udp_rc = run_scenario("udp");
+    const int shm_rc = run_scenario("shm");
     cleanup_paths();
-    return (uds_rc == 0 && udp_rc == 0) ? 0 : 1;
+    cleanup_shm_paths();
+    return (uds_rc == 0 && udp_rc == 0 && shm_rc == 0) ? 0 : 1;
 }

@@ -7,6 +7,7 @@
 #include <string>
 #include <sys/socket.h>
 #include <thread>
+#include <type_traits>
 #include <unistd.h>
 
 namespace {
@@ -14,6 +15,7 @@ namespace {
 constexpr uint16_t kUdpPort = 19000;
 constexpr const char* kUdsServerPath = "/tmp/cpp_tricks_echo_server.sock";
 constexpr const char* kUdsClientPath = "/tmp/cpp_tricks_echo_client.sock";
+constexpr const char* kShmEchoName = "/cpp_tricks_shm_echo";
 constexpr auto kTestDuration = std::chrono::seconds(5);
 constexpr int kRecvTimeoutMs = 200;
 
@@ -35,25 +37,46 @@ uint64_t run_echo_benchmark(const typename Transport::BindParams& bind_params,
     EchoServer server(bind_params);
 
     const auto server_fn = [&]() {
-        set_recv_timeout(server.fd(), kRecvTimeoutMs);
+        if constexpr (requires { server.fd(); }) {
+            set_recv_timeout(server.fd(), kRecvTimeoutMs);
+        }
 
         char storage[1024];
         Buffer buf = Buffer::writable(storage, sizeof(storage));
         typename Transport::RecvResult recv{};
 
         while (!stop.load(std::memory_order_acquire)) {
-            try {
-                server.recv_from(buf, recv);
-                server.echo(recv, buf);
-            } catch (const std::runtime_error&) {
-                // recv timeout while waiting for the next datagram
+            if constexpr (requires {
+                ShmSpsc::try_recv(server.handle(), buf, recv);
+            }) {
+                if (ShmSpsc::try_recv(server.handle(), buf, recv)) {
+                    server.echo(recv, buf);
+                } else {
+                    std::this_thread::yield();
+                }
+            } else {
+                try {
+                    server.recv_from(buf, recv);
+                    server.echo(recv, buf);
+                } catch (const std::runtime_error&) {
+                }
             }
         }
     };
 
     const auto client_fn = [&]() {
-        EchoClient client;
-        set_recv_timeout(client.fd(), kRecvTimeoutMs);
+        EchoClient client = [&]() {
+            if constexpr (std::is_same_v<Transport, ShmSpsc>) {
+                typename Transport::BindParams client_bind = bind_params;
+                client_bind.create = false;
+                return EchoClient(client_bind);
+            }
+            return EchoClient();
+        }();
+
+        if constexpr (requires { client.fd(); }) {
+            set_recv_timeout(client.fd(), kRecvTimeoutMs);
+        }
 
         const char msg[] = "ping";
         char reply[64];
@@ -126,13 +149,21 @@ uint64_t run_uds_benchmark() {
     return trips;
 }
 
+uint64_t run_shm_benchmark() {
+    return run_echo_benchmark<ShmSpsc, ShmEchoServer, ShmEchoClient>(
+        ShmSpsc::BindParams{.name = kShmEchoName, .create = true},
+        ShmSpsc::SendParams{.payload = Buffer::read_only("ping", 3)});
+}
+
 }  // namespace
 
 int main() {
     const uint64_t udp_trips = run_udp_benchmark();
     const uint64_t uds_trips = run_uds_benchmark();
+    const uint64_t shm_trips = run_shm_benchmark();
 
     std::cout << "UDP round trips in 5s: " << udp_trips << '\n';
     std::cout << "UDS round trips in 5s: " << uds_trips << '\n';
+    std::cout << "SHM round trips in 5s: " << shm_trips << '\n';
     return 0;
 }

@@ -1,10 +1,12 @@
 #include "router_app.h"
 #include "router_client_config.h"
-#include "router_protocol.h"
+#include "router/factory.hpp"
+#include "router_protocol.hpp"
 
 #include <chrono>
 #include <cstring>
 #include <iostream>
+#include <type_traits>
 #include <unistd.h>
 
 namespace {
@@ -20,53 +22,84 @@ uint64_t ns_since_start() {
 
 void usage(const char* prog) {
     std::cerr << "usage: " << prog << " uds [router_path]\n"
-              << "       " << prog << " udp [port]\n";
+              << "       " << prog << " udp [port]\n"
+              << "       " << prog << " shm\n";
 }
 
-template<typename Transport>
-void run_router(const typename Transport::BindParams& bind_params) {
-    const EndpointRegistry& reg = demo_registry();
-    Server<Transport> router;
-    router.bind(bind_params);
-
-    constexpr int kTestRecvTimeoutMs = 200;
-    constexpr int kTestIdleExitMs = 1500;
+RouterRunOptions run_options() {
+    RouterRunOptions opts;
+    opts.poll_timeout_ms = 200;
     if (router_test_mode()) {
-        router.set_recv_timeout_ms(kTestRecvTimeoutMs);
+        opts.idle_exit_ms = 1500;
     }
+    return opts;
+}
 
+template<typename Server>
+void run_forward_loop(Server& server, const RouterTopology& topo) {
+    const RouteRule* rules = kDemoRouteRules;
+    const size_t rule_count = sizeof(kDemoRouteRules) / sizeof(kDemoRouteRules[0]);
+
+    server.run(
+        rules,
+        rule_count,
+        ns_since_start,
+        [&](uint8_t source, uint8_t dest, const RouterFrame& frame) {
+            router_log(router_route_line(topo, source, dest, frame));
+        },
+        run_options());
+}
+
+template<DatagramTransport Transport>
+void run_datagram_router(const RouterTopology& topo) {
+    auto server = make_datagram_router_server<Transport>(topo);
+    bind_datagram_router_listen(server, topo);
     std::cerr << "router listening ("
-              << router_endpoint_name(reg, kEndpointServer) << ")\n";
+              << peer_display_name(topo, kEndpointServer) << ")\n";
+    run_forward_loop(server, topo);
+}
 
-    RouterFrame frame;
-    auto last_activity = Clock::now();
+void run_shm_router(const RouterTopology& topo) {
+    auto server = make_shm_router_server(topo);
+    bind_shm_router_listen(server, topo);
+    std::cerr << "SHM router on shared-memory rings\n";
+    run_forward_loop(server, topo);
+}
 
-    while (!router_stop_requested()) {
-        try {
-            const ForwardResult fwd = router_forward(
-                router,
-                reg,
-                kDemoRouteRules,
-                sizeof(kDemoRouteRules) / sizeof(kDemoRouteRules[0]),
-                frame,
-                ns_since_start());
-            if (!fwd) {
-                continue;
+struct ServerRunner {
+    int argc;
+    char** argv;
+
+    template<typename Transport>
+    int operator()() const {
+        if constexpr (std::is_same_v<Transport, ShmSpsc>) {
+            const RouterTopology& topo = demo_topology(TransportKind::Shm);
+            run_shm_router(topo);
+            return 0;
+        } else {
+            const TransportKind kind =
+                std::is_same_v<Transport, Udp> ? TransportKind::Udp : TransportKind::Uds;
+            const RouterTopology& topo = demo_topology(kind);
+
+            if constexpr (std::is_same_v<Transport, Uds>) {
+                const std::string path = (argc >= 3) ? argv[2] : kRouterUdsPath;
+                if (path != kRouterUdsPath) {
+                    ::unlink(path.c_str());
+                }
+                std::cerr << "UDS router on " << path << '\n';
+            } else {
+                const uint16_t port = (argc >= 3)
+                    ? static_cast<uint16_t>(std::stoi(argv[2]))
+                    : kRouterUdpPort;
+                std::cerr << "UDP router on port " << port << '\n';
+                (void)port;
             }
 
-            last_activity = Clock::now();
-            for (uint8_t dest : fwd.targets) {
-                router_log(router_route_line(reg, fwd.source, dest, frame));
-            }
-        } catch (const std::runtime_error&) {
-            if (router_test_mode()
-                && router_idle_expired(last_activity,
-                    std::chrono::milliseconds(kTestIdleExitMs))) {
-                return;
-            }
+            run_datagram_router<Transport>(topo);
+            return 0;
         }
     }
-}
+};
 
 }  // namespace
 
@@ -79,18 +112,9 @@ int main(int argc, char* argv[]) {
     }
 
     try {
-        if (std::strcmp(argv[1], "uds") == 0) {
-            const std::string path = (argc >= 3) ? argv[2] : kRouterUdsPath;
-            ::unlink(path.c_str());
-            std::cerr << "UDS router on " << path << '\n';
-            run_router<Uds>(Uds::BindParams{.path = path});
-        } else if (std::strcmp(argv[1], "udp") == 0) {
-            const uint16_t port = (argc >= 3)
-                ? static_cast<uint16_t>(std::stoi(argv[2]))
-                : kRouterUdpPort;
-            std::cerr << "UDP router on port " << port << '\n';
-            run_router<Udp>(Udp::BindParams{.port = port});
-        } else {
+        const int rc = dispatch_transport_kind(
+            argv[1], ServerRunner{argc, argv});
+        if (rc != 0) {
             usage(argv[0]);
             return 1;
         }

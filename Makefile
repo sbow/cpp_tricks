@@ -66,6 +66,12 @@ clean:
 
 IPC_TEST_DIR     := $(BUILD_ROOT)/ipc/test
 IPC_TEST_FLAGS   := -Icpp_tricks/ipc/src -pthread
+IPC_TEST_LDFLAGS := -lrt
+IPC_IPC_HEADERS  := cpp_tricks/ipc/src/ipc.hpp cpp_tricks/ipc/src/ipc.h \
+	$(wildcard cpp_tricks/ipc/src/ipc/*.hpp)
+IPC_ROUTER_HEADERS := cpp_tricks/ipc/src/router_protocol.hpp cpp_tricks/ipc/src/router_protocol.h \
+	cpp_tricks/ipc/src/router_app.h \
+	$(wildcard cpp_tricks/ipc/src/router/*.hpp)
 IPC_ECHO_TEST    := $(IPC_TEST_DIR)/echo_tests
 IPC_ECHO_SERVER           := $(IPC_TEST_DIR)/echo_server
 IPC_ECHO_CLIENT           := $(IPC_TEST_DIR)/echo_client
@@ -76,30 +82,49 @@ IPC_ROUTER_TEST           := $(IPC_TEST_DIR)/router_test
 IPC_UDP_PORT     := 19000
 IPC_UDS_SERVER   := /tmp/cpp_tricks_echo_server.sock
 IPC_UDS_CLIENT   := /tmp/cpp_tricks_echo_client.sock
+IPC_SHM_NAME     := /cpp_tricks_shm_echo
 IPC_TEST_SECONDS := 5
+IPC_STOP_WAIT_SEC := 5
+
+# Graceful stop: SIGTERM, wait up to IPC_STOP_WAIT_SEC, then SIGKILL.
+define ipc_stop_pid
+	kill -TERM $(1) 2>/dev/null || true; \
+	_secs=0; \
+	while [ $$_secs -lt $(IPC_STOP_WAIT_SEC) ]; do \
+		if ! kill -0 $(1) 2>/dev/null; then \
+			wait $(1) 2>/dev/null || true; \
+			_secs=$(IPC_STOP_WAIT_SEC); \
+		else \
+			sleep 0.1; \
+			_secs=$$((_secs + 1)); \
+		fi; \
+	done; \
+	kill -KILL $(1) 2>/dev/null || true; \
+	wait $(1) 2>/dev/null || true
+endef
 
 $(IPC_TEST_DIR):
 	mkdir -p $@
 
-$(IPC_ECHO_TEST): cpp_tricks/ipc/test/echo_tests.cpp cpp_tricks/ipc/src/ipc.h | $(IPC_TEST_DIR)
+$(IPC_ECHO_TEST): cpp_tricks/ipc/test/echo_tests.cpp $(IPC_IPC_HEADERS) | $(IPC_TEST_DIR)
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(IPC_TEST_FLAGS) $(IPC_TEST_LDFLAGS) -o $@ $<
+
+$(IPC_ECHO_SERVER): cpp_tricks/ipc/test/echo_server.cpp $(IPC_IPC_HEADERS) | $(IPC_TEST_DIR)
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(IPC_TEST_FLAGS) $(IPC_TEST_LDFLAGS) -o $@ $<
+
+$(IPC_ECHO_CLIENT): cpp_tricks/ipc/test/echo_client.cpp $(IPC_IPC_HEADERS) | $(IPC_TEST_DIR)
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(IPC_TEST_FLAGS) $(IPC_TEST_LDFLAGS) -o $@ $<
+
+$(IPC_ECHO_CLIENT_BENCHMARK): cpp_tricks/ipc/test/echo_client_benchmark.cpp $(IPC_IPC_HEADERS) | $(IPC_TEST_DIR)
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(IPC_TEST_FLAGS) $(IPC_TEST_LDFLAGS) -o $@ $<
+
+$(IPC_ROUTER_SERVER): cpp_tricks/ipc/test/router_server.cpp $(IPC_IPC_HEADERS) $(IPC_ROUTER_HEADERS) cpp_tricks/ipc/test/router_client_config.h | $(IPC_TEST_DIR)
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(IPC_TEST_FLAGS) -o $@ $<
 
-$(IPC_ECHO_SERVER): cpp_tricks/ipc/test/echo_server.cpp cpp_tricks/ipc/src/ipc.h | $(IPC_TEST_DIR)
+$(IPC_ROUTER_CLIENT): cpp_tricks/ipc/test/router_client.cpp $(IPC_IPC_HEADERS) $(IPC_ROUTER_HEADERS) cpp_tricks/ipc/test/router_client_config.h | $(IPC_TEST_DIR)
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(IPC_TEST_FLAGS) -o $@ $<
 
-$(IPC_ECHO_CLIENT): cpp_tricks/ipc/test/echo_client.cpp cpp_tricks/ipc/src/ipc.h | $(IPC_TEST_DIR)
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(IPC_TEST_FLAGS) -o $@ $<
-
-$(IPC_ECHO_CLIENT_BENCHMARK): cpp_tricks/ipc/test/echo_client_benchmark.cpp cpp_tricks/ipc/src/ipc.h | $(IPC_TEST_DIR)
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(IPC_TEST_FLAGS) -o $@ $<
-
-$(IPC_ROUTER_SERVER): cpp_tricks/ipc/test/router_server.cpp cpp_tricks/ipc/src/ipc.h cpp_tricks/ipc/src/router_protocol.h cpp_tricks/ipc/src/router_app.h cpp_tricks/ipc/test/router_client_config.h | $(IPC_TEST_DIR)
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(IPC_TEST_FLAGS) -o $@ $<
-
-$(IPC_ROUTER_CLIENT): cpp_tricks/ipc/test/router_client.cpp cpp_tricks/ipc/src/ipc.h cpp_tricks/ipc/src/router_protocol.h cpp_tricks/ipc/src/router_app.h cpp_tricks/ipc/test/router_client_config.h | $(IPC_TEST_DIR)
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(IPC_TEST_FLAGS) -o $@ $<
-
-$(IPC_ROUTER_TEST): cpp_tricks/ipc/test/router_test.cpp cpp_tricks/ipc/src/router_protocol.h cpp_tricks/ipc/test/router_client_config.h | $(IPC_TEST_DIR)
+$(IPC_ROUTER_TEST): cpp_tricks/ipc/test/router_test.cpp $(IPC_ROUTER_HEADERS) cpp_tricks/ipc/test/router_client_config.h | $(IPC_TEST_DIR)
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(IPC_TEST_FLAGS) -o $@ $<
 
 ipc-echo-server: $(IPC_ECHO_SERVER)
@@ -119,14 +144,20 @@ test-ipc-mp: $(IPC_ECHO_SERVER) $(IPC_ECHO_CLIENT_BENCHMARK)
 	server_pid=$$!; \
 	sleep 0.2; \
 	$(IPC_ECHO_CLIENT_BENCHMARK) udp 127.0.0.1 $(IPC_UDP_PORT) $(IPC_TEST_SECONDS); \
-	kill $$server_pid 2>/dev/null; wait $$server_pid 2>/dev/null || true
+	$(call ipc_stop_pid,$$server_pid)
 	rm -f $(IPC_UDS_SERVER) $(IPC_UDS_CLIENT); \
 	$(IPC_ECHO_SERVER) uds $(IPC_UDS_SERVER) & \
 	server_pid=$$!; \
 	sleep 0.2; \
 	$(IPC_ECHO_CLIENT_BENCHMARK) uds $(IPC_UDS_SERVER) $(IPC_UDS_CLIENT) $(IPC_TEST_SECONDS); \
-	kill $$server_pid 2>/dev/null; wait $$server_pid 2>/dev/null || true; \
-	rm -f $(IPC_UDS_SERVER) $(IPC_UDS_CLIENT)
+	$(call ipc_stop_pid,$$server_pid); \
+	rm -f $(IPC_UDS_SERVER) $(IPC_UDS_CLIENT); \
+	$(IPC_ECHO_SERVER) shm $(IPC_SHM_NAME) & \
+	server_pid=$$!; \
+	sleep 0.2; \
+	$(IPC_ECHO_CLIENT_BENCHMARK) shm $(IPC_SHM_NAME) $(IPC_TEST_SECONDS); \
+	$(call ipc_stop_pid,$$server_pid); \
+	rm -f /dev/shm/cpp_tricks_shm_echo 2>/dev/null || true
 
 help:
 	@echo "Programs: $(if $(PROGRAMS),$(PROGRAMS),(none — add cpp_tricks/<name>/src/*.cpp))"

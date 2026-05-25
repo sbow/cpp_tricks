@@ -17,6 +17,8 @@ from pathlib import Path
 PROGRAMS_ROOT_DEFAULT = Path("cpp_tricks")
 ARTIFACTS_ROOT_DEFAULT = Path("build/interrogate")
 SITE_DIR_DEFAULT = Path("build/interrogate/site")
+RUN_TIMEOUT_SEC_DEFAULT = 5.0
+RUN_TIMEOUT_EXIT = 124
 
 
 @dataclass
@@ -48,20 +50,39 @@ class Program:
     sources: list[Path]
 
 
-def run(argv: list[str], *, cwd: Path) -> CommandResult:
-    proc = subprocess.run(
-        argv,
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        errors="replace",
-    )
-    return CommandResult(
-        argv=argv,
-        stdout=proc.stdout,
-        stderr=proc.stderr,
-        returncode=proc.returncode,
-    )
+def run(argv: list[str], *, cwd: Path, timeout_sec: float | None = None) -> CommandResult:
+    try:
+        proc = subprocess.run(
+            argv,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=timeout_sec,
+        )
+        return CommandResult(
+            argv=argv,
+            stdout=proc.stdout,
+            stderr=proc.stderr,
+            returncode=proc.returncode,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout if exc.stdout is not None else ""
+        stderr = exc.stderr if exc.stderr is not None else ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        note = (
+            f"\n(interrogate: timed out after {timeout_sec}s; "
+            "process terminated — common for servers blocking on socket I/O)\n"
+        )
+        return CommandResult(
+            argv=argv,
+            stdout=stdout,
+            stderr=stderr + note,
+            returncode=RUN_TIMEOUT_EXIT,
+        )
 
 
 def read_preview(path: Path, max_lines: int) -> tuple[str, bool]:
@@ -119,6 +140,7 @@ def build_pipeline(
     out_dir: Path,
     std: str,
     debug: bool,
+    run_timeout_sec: float | None = RUN_TIMEOUT_SEC_DEFAULT,
 ) -> tuple[list[Stage], Path | None]:
     out_dir.mkdir(parents=True, exist_ok=True)
     primary = pick_primary_source(program.sources)
@@ -228,12 +250,22 @@ def build_pipeline(
 
     # 5 — run
     if executable.exists():
-        run_cmd = run([str(executable)], cwd=project_root)
+        run_cmd = run(
+            [str(executable)],
+            cwd=project_root,
+            timeout_sec=run_timeout_sec,
+        )
+        run_desc = "Execute the linked binary and capture stdout/stderr."
+        if run_timeout_sec is not None:
+            run_desc += (
+                f" Killed after {run_timeout_sec:g}s if still running "
+                "(avoids blocking on recv/server loops)."
+            )
         stages.append(
             Stage(
                 id="run",
                 title="Run",
-                description="Execute the linked binary and capture stdout/stderr.",
+                description=run_desc,
                 command=run_cmd,
             )
         )
@@ -751,6 +783,16 @@ def main() -> int:
         action="store_true",
         help="Remove artifacts and site dirs before building",
     )
+    parser.add_argument(
+        "--run-timeout",
+        type=float,
+        default=RUN_TIMEOUT_SEC_DEFAULT,
+        metavar="SEC",
+        help=(
+            "Max seconds for the run stage per program (default: "
+            f"{RUN_TIMEOUT_SEC_DEFAULT:g}). Use 0 for no limit."
+        ),
+    )
     args = parser.parse_args()
 
     project_root = Path.cwd().resolve()
@@ -800,12 +842,14 @@ def main() -> int:
         print(f"  Sources: {', '.join(str(s.relative_to(project_root)) for s in program.sources)}")
         print(f"  Artifacts: {out_dir.relative_to(project_root)}")
 
+        run_timeout = args.run_timeout if args.run_timeout > 0 else None
         stages, _exe = build_pipeline(
             project_root,
             program,
             out_dir,
             args.std,
             debug=not args.no_debug,
+            run_timeout_sec=run_timeout,
         )
         program_results[program.name] = stages
 

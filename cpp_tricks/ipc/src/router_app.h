@@ -1,30 +1,36 @@
 #pragma once
 
-#include <csignal>
+#include "ipc/app_shutdown.hpp"
+
+#include <chrono>
 #include <cstdlib>
+#include <string_view>
+#include <unistd.h>
 
 inline volatile std::sig_atomic_t* router_stop_flag() {
-    static volatile std::sig_atomic_t flag = 0;
-    return &flag;
-}
-
-inline void router_on_stop(int) {
-    *router_stop_flag() = 1;
+    return app_stop_flag();
 }
 
 inline void install_router_stop_handlers() {
-    struct sigaction sa{};
-    sa.sa_handler = router_on_stop;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    sigaction(SIGTERM, &sa, nullptr);
-    sigaction(SIGINT, &sa, nullptr);
+    install_app_stop_handlers();
 }
 
 inline bool router_stop_requested() {
-    return *router_stop_flag() != 0;
+    return app_stop_requested();
 }
 
 inline bool router_test_mode() {
     return std::getenv("ROUTER_TEST") != nullptr;
+}
+
+inline void router_log(std::string_view line) {
+    std::string out(line);
+    out += '\n';
+    (void)!::write(STDERR_FILENO, out.data(), out.size());
+}
+
+inline bool router_idle_expired(
+    std::chrono::steady_clock::time_point last,
+    std::chrono::milliseconds limit) {
+    return std::chrono::steady_clock::now() - last > limit;
 }

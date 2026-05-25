@@ -6,6 +6,7 @@
 #include <iostream>
 #include <string>
 #include <sys/socket.h>
+#include <type_traits>
 
 namespace {
 
@@ -13,12 +14,14 @@ constexpr uint16_t kDefaultUdpPort = 19000;
 constexpr const char* kDefaultUdpHost = "127.0.0.1";
 constexpr const char* kDefaultUdsServerPath = "/tmp/cpp_tricks_echo_server.sock";
 constexpr const char* kDefaultUdsClientPath = "/tmp/cpp_tricks_echo_client.sock";
+constexpr const char* kDefaultShmName = "/cpp_tricks_shm_echo";
 constexpr int kDefaultDurationSec = 5;
 constexpr int kRecvTimeoutMs = 200;
 
 void usage(const char* prog) {
     std::cerr << "usage: " << prog << " udp [host] [port] [seconds]\n"
-              << "       " << prog << " uds [server_path] [client_path] [seconds]\n";
+              << "       " << prog << " uds [server_path] [client_path] [seconds]\n"
+              << "       " << prog << " shm [region_name] [seconds]\n";
 }
 
 void set_recv_timeout(int fd, int ms) {
@@ -30,10 +33,21 @@ void set_recv_timeout(int fd, int ms) {
     }
 }
 
-template<typename Transport, typename EchoClient>
-uint64_t run_benchmark(typename Transport::SendParams send_params, int duration_sec) {
-    EchoClient client;
-    set_recv_timeout(client.fd(), kRecvTimeoutMs);
+template<typename Transport, typename EchoClientType>
+uint64_t run_benchmark(
+    typename Transport::SendParams send_params,
+    int duration_sec,
+    const typename Transport::BindParams* client_bind = nullptr) {
+    EchoClientType client = [&]() {
+        if (client_bind) {
+            return EchoClientType(*client_bind);
+        }
+        return EchoClientType();
+    }();
+
+    if constexpr (requires { client.fd(); }) {
+        set_recv_timeout(client.fd(), kRecvTimeoutMs);
+    }
 
     const auto deadline = std::chrono::steady_clock::now()
         + std::chrono::seconds(duration_sec);
@@ -110,6 +124,20 @@ uint64_t run_uds(int argc, char* argv[]) {
     return trips;
 }
 
+uint64_t run_shm(int argc, char* argv[]) {
+    const char* name = (argc >= 3) ? argv[2] : kDefaultShmName;
+    const int duration = (argc >= 4) ? std::stoi(argv[3]) : kDefaultDurationSec;
+
+    const ShmSpsc::BindParams client_bind{.name = name, .create = false};
+    const uint64_t trips = run_benchmark<ShmSpsc, ShmEchoClient>(
+        ShmSpsc::SendParams{.payload = Buffer::read_only("ping", 3)},
+        duration,
+        &client_bind);
+
+    std::cout << "SHM round trips in " << duration << "s: " << trips << '\n';
+    return trips;
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
@@ -123,6 +151,8 @@ int main(int argc, char* argv[]) {
             run_udp(argc, argv);
         } else if (std::strcmp(argv[1], "uds") == 0) {
             run_uds(argc, argv);
+        } else if (std::strcmp(argv[1], "shm") == 0) {
+            run_shm(argc, argv);
         } else {
             usage(argv[0]);
             return 1;
